@@ -1,10 +1,19 @@
-import {API_KEY, ALPHA_VANTAGE_BASE, POPULAR_ASSETS, CACHE_TTL} from '../constants'; // Adjust import if needed
+import {FINNHUB_API_KEY, FINNHUB_BASE, COINGECKO_BASE, CRYPTO_ID_MAP, POPULAR_ASSETS, CACHE_TTL} from '../constants';
 
 const cache = new Map();
 
-const fetchFromAlphaVantage = async (params) => {
-    const queryString = new URLSearchParams({ apikey: API_KEY, ...params }).toString();
-    const cacheKey = queryString;
+// Helper function to calculate price ranges from historical data
+const calculateRange = (dataArray, days) => {
+    const slice = days > 0 ? dataArray.slice(-days) : dataArray;
+    return {
+        low: Math.min(...slice),
+        high: Math.max(...slice),
+    };
+};
+
+const fetchFromFinnhub = async (endpoint, params = {}) => {
+    const queryString = new URLSearchParams({ token: FINNHUB_API_KEY, ...params }).toString();
+    const cacheKey = `${endpoint}?${queryString}`;
     const cached = cache.get(cacheKey);
 
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
@@ -12,13 +21,20 @@ const fetchFromAlphaVantage = async (params) => {
     }
 
     try {
-        const response = await fetch(`${ALPHA_VANTAGE_BASE}?${queryString}`);
+        const response = await fetch(`${FINNHUB_BASE}${endpoint}?${queryString}`);
         const data = await response.json();
+
+        // Check for errors
+        if (data.error) {
+            console.warn('Finnhub API Error:', data.error);
+            return { _error: true, message: data.error };
+        }
+
         cache.set(cacheKey, { data, timestamp: Date.now() });
         return data;
     } catch (error) {
         console.error('API Error:', error);
-        return null;
+        return { _error: true, message: error.message };
     }
 };
 
@@ -30,200 +46,147 @@ export const searchSymbols = async (keywords) => {
 
     if (popularMatches.length > 0) return popularMatches;
 
-    const data = await fetchFromAlphaVantage({ function: 'SYMBOL_SEARCH', keywords });
+    const data = await fetchFromFinnhub('/search', { q: keywords });
 
-    return data?.bestMatches?.map(match => ({
-        symbol: match['1. symbol'],
-        name: match['2. name'],
-        type: match['3. type'] === 'Crypto' ? 'crypto' : 'stock',
-        exchange: match['4. region'],
-    })) || [];
+    if (data._error || !data.result) return [];
+
+    return data.result.slice(0, 10).map(match => ({
+        symbol: match.symbol,
+        name: match.description,
+        type: 'stock',
+        exchange: match.type,
+    }));
 };
 
 export const getGlobalQuote = async (symbol) => {
-    const data = await fetchFromAlphaVantage({ function: 'GLOBAL_QUOTE', symbol });
-    const quote = data?.['Global Quote'];
-    if (quote) {
+    const data = await fetchFromFinnhub('/quote', { symbol });
+
+    if (data?._error) {
+        console.error(`API Error for ${symbol}:`, data.message);
+        return null;
+    }
+
+    // Finnhub response: {c: current, d: change, dp: percent change, h: high, l: low, o: open, pc: previous close}
+    if (data && data.c) {
         return {
-            price: parseFloat(quote['05. price']) || 0,
-            change: parseFloat(quote['09. change']) || 0,
-            changePercent: parseFloat(quote['10. change percent']?.replace('%', '')) || 0,
+            price: data.c || 0,
+            change: data.d || 0,
+            changePercent: data.dp || 0,
+            high: data.h || 0,
+            low: data.l || 0,
+            open: data.o || 0,
+            previousClose: data.pc || 0,
         };
     }
     return null;
 };
 
 export const getCryptoQuote = async (symbol) => {
-    const data = await fetchFromAlphaVantage({
-        function: 'DIGITAL_CURRENCY_DAILY',
-        symbol,
-        market: 'USD',
-        outputsize: 'compact',
-    });
-    const timeSeries = data?.['Time Series (Digital Currency Daily)'];
-    if (!timeSeries) return null;
+    // Use CoinGecko API (free, no key required)
+    const coinId = CRYPTO_ID_MAP[symbol];
+    if (!coinId) {
+        console.warn(`Unknown crypto symbol: ${symbol}`);
+        return null;
+    }
 
-    const dates = Object.keys(timeSeries).sort().reverse();
-    const latest = timeSeries[dates[0]];
-    const prev = dates[1] ? timeSeries[dates[1]] : latest;
-    const price = parseFloat(latest['4. close']) || 0;
-    const prevClose = parseFloat(prev['4. close']) || price;
-    const change = price - prevClose;
-    const changePercent = prevClose > 0 ? (change / prevClose * 100) : 0;
+    const cacheKey = `coingecko-${coinId}`;
+    const cached = cache.get(cacheKey);
 
-    return { price, change, changePercent };
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        return cached.data;
+    }
+
+    try {
+        const response = await fetch(
+            `${COINGECKO_BASE}/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true`
+        );
+        const data = await response.json();
+
+        if (!data[coinId]) {
+            console.error(`No data for ${symbol} (${coinId})`);
+            return null;
+        }
+
+        const price = data[coinId].usd;
+        const changePercent = data[coinId].usd_24h_change || 0;
+        const change = price * (changePercent / 100);
+
+        const result = {
+            price,
+            change,
+            changePercent,
+        };
+
+        cache.set(cacheKey, { data: result, timestamp: Date.now() });
+        return result;
+    } catch (error) {
+        console.error(`Error fetching crypto quote for ${symbol}:`, error);
+        return null;
+    }
 };
 
 export const getDailyData = async (symbol) => {
     try {
-// Timeout wrapper (5s max)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-        const data = await fetchFromAlphaVantage({
-            function: 'TIME_SERIES_DAILY',
+        const now = Math.floor(Date.now() / 1000);
+        const oneYearAgo = now - (365 * 24 * 60 * 60);
+
+        const data = await fetchFromFinnhub('/stock/candle', {
             symbol,
-            outputsize: 'compact' // Changed to compact (last 100 days)
+            resolution: 'D',
+            from: oneYearAgo,
+            to: now,
         });
-        clearTimeout(timeoutId);
 
-        if (!data?.['Time Series (Daily)']) return null;
+        if (data?._error || data?.s === 'no_data' || !data?.h || !data?.l) {
+            console.warn(`No daily data for ${symbol}`);
+            return null;
+        }
 
-        const timeSeries = data['Time Series (Daily)'];
-        const dates = Object.keys(timeSeries).sort().reverse(); // Latest first
-        const allData = dates.map(date => ({
-            high: parseFloat(timeSeries[date]['2. high']),
-            low: parseFloat(timeSeries[date]['3. low']),
-        }));
+        // Combine highs and lows for overall range
+        const allPrices = [...data.h, ...data.l];
 
-        const getRange = (slice) => {
-            const lows = slice.map(d => d.low).filter(Boolean);
-            const highs = slice.map(d => d.high).filter(Boolean);
-            return lows.length > 0 ? {
-                low: Math.min(...lows),
-                high: Math.max(...highs),
-            } : { low: 0, high: 0 };
-        };
         return {
-            day: getRange(allData.slice(0, 1)),
-            month: getRange(allData.slice(0, 30)),
-            year: getRange(allData.slice(0, 100)), // Compact limits to ~100, so adjust
-            alltime: getRange(allData), // Still full of compact
+            day: calculateRange(allPrices.slice(-2), 0),    // Last day
+            month: calculateRange(allPrices.slice(-60), 0),  // Last 30 days (2 prices/day)
+            year: calculateRange(allPrices, 0),              // All year data
+            alltime: calculateRange(allPrices, 0),
         };
     } catch (error) {
-        if (error.name === 'AbortError') {
-            console.warn(`Timeout fetching daily data for ${symbol}`);
-        } else {
-            console.error(`Error fetching daily data for ${symbol}:`, error);
-        }
-        return null; // Fallback to defaults
+        console.error(`Error fetching daily data for ${symbol}:`, error);
+        return null;
     }
 };
 
 export const getCryptoData = async (symbol) => {
     try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-        const data = await fetchFromAlphaVantage({
-            function: 'DIGITAL_CURRENCY_DAILY',
-            symbol,
-            market: 'USD',
-            outputsize: 'compact' // Changed to compact
-        });
+        const coinId = CRYPTO_ID_MAP[symbol];
+        if (!coinId) {
+            console.warn(`Unknown crypto symbol: ${symbol}`);
+            return null;
+        }
 
-        clearTimeout(timeoutId);
+        // Get market chart data for 1 year
+        const response = await fetch(
+            `${COINGECKO_BASE}/coins/${coinId}/market_chart?vs_currency=usd&days=365`
+        );
+        const data = await response.json();
 
-        if (!data?.['Time Series (Digital Currency Daily)']) return null;
+        if (!data.prices || data.prices.length === 0) {
+            console.warn(`No historical data for ${symbol}`);
+            return null;
+        }
 
-        const timeSeries = data['Time Series (Digital Currency Daily)'];
-        const dates = Object.keys(timeSeries).sort().reverse();
-        const allData = dates.map(date => ({
-            high: parseFloat(timeSeries[date]['2. high']),
-            low: parseFloat(timeSeries[date]['3. low']),
-        }));
-
-        const getRange = (slice) => {
-            const lows = slice.map(d => d.low).filter(Boolean);
-            const highs = slice.map(d => d.high).filter(Boolean);
-            return lows.length > 0 ? {
-                low: Math.min(...lows),
-                high: Math.max(...highs),
-            } : { low: 0, high: 0 };
-        };
+        // data.prices is an array of [timestamp, price]
+        const prices = data.prices.map(p => p[1]);
 
         return {
-            day: getRange(allData.slice(0, 1)),
-            month: getRange(allData.slice(0, 30)),
-            year: getRange(allData.slice(0, 100)),
-            alltime: getRange(allData),
+            day: calculateRange(prices, 1),
+            month: calculateRange(prices, 30),
+            year: calculateRange(prices, 365),
+            alltime: calculateRange(prices, 0),
         };
     } catch (error) {
-        if (error.name === 'AbortError') {
-            console.warn(`Timeout fetching crypto data for ${symbol}`);
-        } else {
-            console.error(`Error fetching crypto data for ${symbol}:`, error);
-        }
+        console.error(`Error fetching crypto data for ${symbol}:`, error);
         return null;
     }
-};
-
-import { useMemo } from 'react';
-
-export const usePortfolioTotals = (portfolio, assetData) => useMemo(() => {
-    const totals = { stocks: 0, crypto: 0, savings: 0, total: 0, changePercent: 0 };
-    let totalDollarChange = 0;
-    portfolio.forEach(item => {
-        if (item.asset.type === 'savings') {
-            totals.savings += item.asset.amount || 0; // Direct amount
-            totals.total += item.asset.amount || 0;
-            return; // No change % for savings
-        }
-
-        const cacheKey = `${item.asset.symbol}-${item.asset.type}`;
-        const data = assetData[cacheKey];
-        if (data?.quote) {
-            const value = data.quote.price * item.quantity;
-            totals.total += value;
-            if (item.asset.type === 'stock') totals.stocks += value;
-            else if (item.asset.type === 'crypto') totals.crypto += value;
-            totalDollarChange += value * (data.quote.changePercent / 100);
-        }
-    });
-    const portfolioChangePercent = totals.total > 0 ? (totalDollarChange / totals.total) * 100 : 0;
-    totals.changePercent = portfolioChangePercent; // FIXED: Assign to totals
-
-    return totals;
-
-}, [portfolio, assetData]);
-
-// Simulated chart data (replace with real historical fetches for prod)
-
-export const generateChartData = (portfolio, assetData) => {
-    const data = [];
-    const today = new Date();
-    let baseValue = 0;
-
-    for (let i = 29; i >= 0; i--) {
-        const date = new Date(today);
-        date.setDate(date.getDate() - i);
-        const currentValue = portfolio.reduce((sum, item) => {
-            if (item.asset.type === 'savings') {
-                return sum + (item.asset.amount || 0); // Stable + tiny daily interest
-            }
-            const cacheKey = `${item.asset.symbol}-${item.asset.type}`;
-            const assetInfo = assetData[cacheKey];
-            return sum + (assetInfo?.quote?.price * item.quantity || 0);
-        }, 0);
-
-        // eslint-disable-next-line no-unused-vars
-        if (i === 29) baseValue = currentValue || 1; // Avoid div0
-
-        const variance = Math.sin(i * 0.5) * 0.05 + (Math.random() - 0.5) * 0.03;
-        const historicalValue = Math.max(0, currentValue * (1 + variance - (i * 0.001)));
-
-        data.push({
-            date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-            value: historicalValue,
-        });
-    }
-    return data;
 };

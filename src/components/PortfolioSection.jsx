@@ -17,7 +17,8 @@ const PortfolioSection = ({ title, items, onAssetClick, assetData, onNewSavingsC
             return acc;
         }
         const symbol = item.asset.symbol;
-        if (!acc[symbol]) acc[symbol] = { items: [], totalQty: 0, totalVal: 0 };
+        if (!acc[symbol]) acc[symbol] = { items: [], totalQty: 0, totalVal: 0, assetName: item.asset.name };
+
         const cacheKey = `${symbol}-${item.asset.type}`;
         const data = assetData[cacheKey];
         const price = data?.quote?.price || 0;
@@ -25,6 +26,11 @@ const PortfolioSection = ({ title, items, onAssetClick, assetData, onNewSavingsC
         acc[symbol].items.push(item);
         acc[symbol].totalQty += item.quantity;
         acc[symbol].totalVal += price * item.quantity;
+
+        // Use cached asset name from assetData or fallback to item's name
+        if (!acc[symbol].assetName) {
+            acc[symbol].assetName = data?.name || item.asset.name;
+        }
 
         return acc;
     }, {});
@@ -65,6 +71,10 @@ const PortfolioSection = ({ title, items, onAssetClick, assetData, onNewSavingsC
                         const isSavings = firstItem.asset.type === 'savings';
                         const groupType = isSavings ? 'savings' : firstItem.asset.type;
                         const groupData = isSavings ? {} : assetData[`${firstItem.asset.symbol}-${groupType}`];
+
+                        // Determine the name to display
+                        const assetName = group.assetName || firstItem.asset.name;
+
                         return (
                             <div
                                 key={key}
@@ -98,7 +108,7 @@ const PortfolioSection = ({ title, items, onAssetClick, assetData, onNewSavingsC
                                             {isSavings ? key : firstItem.asset.symbol}
                                         </h3>
                                         <p style={{ fontSize: '0.875rem', color: '#94a3b8' }}>
-                                            {isSavings ? `Rate: ${firstItem.asset.rate}% APY` : firstItem.asset.name}
+                                            {isSavings ? `Rate: ${firstItem.asset.rate}% APY` : assetName}
                                         </p>
                                         <p style={{ fontSize: '1.125rem', fontWeight: 'bold', color: isSavings ? '#10b981' : '#3b82f6', marginTop: '0.5rem' }}>
                                             ${group.totalVal.toFixed(2)}

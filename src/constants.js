@@ -36,5 +36,20 @@ export const SAVINGS_PRESETS = [
 
 
 export const CACHE_TTL = 5 * 60 * 1000; // 5 minutes in ms
-export const API_KEY = import.meta.env.VITE_API_KEY;
-export const ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query';
+export const FINNHUB_API_KEY = import.meta.env.VITE_FINNHUB_API_KEY;
+export const FINNHUB_BASE = 'https://finnhub.io/api/v1';
+export const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
+
+// Map crypto symbols to CoinGecko IDs
+export const CRYPTO_ID_MAP = {
+    'BTC': 'bitcoin',
+    'ETH': 'ethereum',
+    'BNB': 'binancecoin',
+    'XRP': 'ripple',
+    'ADA': 'cardano',
+    'SOL': 'solana',
+    'DOT': 'polkadot',
+    'DOGE': 'dogecoin',
+    'LINK': 'chainlink',
+    'LTC': 'litecoin',
+};
